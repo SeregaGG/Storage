@@ -6,12 +6,10 @@ from sqlalchemy.orm import sessionmaker
 
 from CustomHTTPException import HTTPExceptions
 
-
 from Settings import config, settings
 from models.models import *
 
 from jose import JWTError, jwt
-
 
 import secrets
 from datetime import datetime, timedelta
@@ -102,32 +100,22 @@ class SAPI(FastAPI):
             if product is None:
                 raise self.exceptions.bad_request
 
-            if product.count == 0:
+            if product.count == 0 or product.count - count < 0:
                 raise self.exceptions.limit_exception
 
-            orders: [Order] = self.session.query(Order).filter_by(customer_id=decode_data.get('user_id')).all()
-
-            for order in orders:
-                if product.count - count < 0:
-                    raise self.exceptions.limit_exception
-
-                if product.id == order.product_id and order.is_active:
-                    order.count += count
-                    product.count -= count
-                    self.session.add(product)
-                    self.session.add(order)
-                    self.session.commit()
-                    return {'Order_id': order.id}
-
-            new_order = Order(customer_id=decode_data.get('user_id'), product_id=product.id, count=count)
-
-            if product.count - count < 0:
-                raise self.exceptions.limit_exception
             product.count -= count
+
+            order: Order = self.session.query(Order).filter_by(customer_id=decode_data.get('user_id')).filter_by(
+                product_id=product.id).first()
+
+            if order is None or not order.is_active:
+                order = Order(customer_id=decode_data.get('user_id'), product_id=product.id, count=0)
+
+            order.count += count
             self.session.add(product)
-            self.session.add(new_order)
+            self.session.add(order)
             self.session.commit()
-            return {'New_order_id': new_order.id}
+            return {'Order_id': order.id}
 
         @self.post('/buy')
         def buy(access_token: str):
@@ -146,6 +134,7 @@ class SAPI(FastAPI):
                 if order.is_active:
                     order.is_active = False
                     self.session.add(order)
-                    total_sum += order.count * float(self.session.query(Product).filter_by(id=order.product_id).first().price)
+                    total_sum += order.count * float(
+                        self.session.query(Product).filter_by(id=order.product_id).first().price)
             self.session.commit()
             return {'total sum': total_sum}
