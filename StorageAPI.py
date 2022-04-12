@@ -1,8 +1,7 @@
-import sqlalchemy.orm
-from fastapi import Depends, FastAPI
+from fastapi import Depends, Request, FastAPI
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 
 from CustomHTTPException import HTTPExceptions
 
@@ -14,6 +13,8 @@ from jose import JWTError, jwt
 import secrets
 from datetime import datetime, timedelta
 
+from loguru import logger
+
 
 class SAPI(FastAPI):
 
@@ -21,15 +22,17 @@ class SAPI(FastAPI):
         FastAPI.__init__(self)
         self.str_format = '%d.%m.%Y %H:%M:%S'
         self.security = HTTPBasic()
-        self.engine = create_engine('postgresql+psycopg2://postgres:9fbj5kn@localhost/storage')
+        self.engine = create_engine(f'postgresql+psycopg2://{config.DB_USER}:{config.DB_PASS}'
+                                    f'@{config.DB_HOST}/{config.DB_NAME}')
+
         self.engine.connect()
         self.exceptions = HTTPExceptions()
-
+        logger.add('logs/logs.log', format='{time} {level} {message}')
         Base.metadata.bind = self.engine
         Base.metadata.create_all(self.engine)
 
         self.DBSession = sessionmaker(bind=self.engine)
-        self.session: sqlalchemy.orm.Session = self.DBSession()
+        self.session: Session = self.DBSession()
         self.methods_init()
 
     def create_access_token(self, data: dict):
@@ -52,10 +55,10 @@ class SAPI(FastAPI):
         return decode_data
 
     def methods_init(self):
+        @logger.catch
         @self.get('/auth')
-        def auth(credentials: HTTPBasicCredentials = Depends(self.security)):
+        def auth(request: Request, credentials: HTTPBasicCredentials = Depends(self.security)):
             user: User = self.session.query(User).filter_by(name=credentials.username).first()
-
             if user is None:
                 raise self.exceptions.auth_exception
 
@@ -66,8 +69,9 @@ class SAPI(FastAPI):
 
             user_data = {'username': credentials.username, 'is_seller': user.is_seller, 'user_id': user.id}
             access_token = self.create_access_token(user_data)
-            return access_token
+            return {'access_token': access_token}
 
+        @logger.catch
         @self.post('/add_to_store')
         def add_product_to_store(access_token: str, lable: str, price: float, count: int = 0):
             decode_data = self.get_data_from_token(access_token)
@@ -81,13 +85,14 @@ class SAPI(FastAPI):
                 new_product = Product(lable=lable, price=price, count=count)
                 self.session.add(new_product)
                 self.session.commit()
-                return {'New product': lable}
+                return {'Product': lable}
 
             exists_product.count += count
             self.session.add(exists_product)
             self.session.commit()
             return {'Product': lable}
 
+        @logger.catch
         @self.post('/add_to_cart')
         def add_product_to_cart(access_token: str, lable: str, count: int = 1):
             decode_data = self.get_data_from_token(access_token)
@@ -117,6 +122,7 @@ class SAPI(FastAPI):
             self.session.commit()
             return {'Order_id': order.id}
 
+        @logger.catch
         @self.post('/buy')
         def buy(access_token: str):
             decode_data = self.get_data_from_token(access_token)
@@ -124,17 +130,20 @@ class SAPI(FastAPI):
             if decode_data.get('is_seller'):
                 raise self.exceptions.forbidden_exception
 
-            current_orders: [Order] = self.session.query(Order).filter_by(customer_id=decode_data.get('user_id')).all()
+            current_orders: [Order] = self.session.query(Order) \
+                .filter_by(customer_id=decode_data.get('user_id')) \
+                .filter_by(is_active=True).all()
 
             if not current_orders:
                 raise self.exceptions.bad_request
 
             total_sum = 0
             for order in current_orders:
-                if order.is_active:
-                    order.is_active = False
-                    self.session.add(order)
-                    total_sum += order.count * float(
-                        self.session.query(Product).filter_by(id=order.product_id).first().price)
+                order.is_active = False
+                self.session.add(order)
+                total_sum += order.count * float(self.session.query(Product)
+                                                 .filter_by(id=order.product_id)
+                                                 .first().price
+                                                 )
             self.session.commit()
             return {'total sum': total_sum}
