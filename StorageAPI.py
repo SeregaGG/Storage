@@ -27,7 +27,7 @@ class SAPI(FastAPI):
 
         self.engine.connect()
         self.exceptions = HTTPExceptions()
-        logger.add('logs/logs.log', format='{time} {level} {message}')
+        logger.add('logs/logs.log', format="{time} {level} {message}")
         Base.metadata.bind = self.engine
         Base.metadata.create_all(self.engine)
 
