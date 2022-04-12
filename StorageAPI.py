@@ -47,9 +47,11 @@ class SAPI(FastAPI):
         last_moment = datetime.strptime(decode_data.get('last_moment'), self.str_format)
 
         if last_moment is None:
+            logger.error('Bad token')
             raise self.exceptions.auth_exception
 
         if datetime.utcnow() > last_moment:
+            logger.error('Lifetime of token is ended')
             raise self.exceptions.auth_exception
 
         return decode_data
@@ -57,18 +59,21 @@ class SAPI(FastAPI):
     def methods_init(self):
         @logger.catch
         @self.get('/auth')
-        def auth(request: Request, credentials: HTTPBasicCredentials = Depends(self.security)):
+        def auth(credentials: HTTPBasicCredentials = Depends(self.security)):
             user: User = self.session.query(User).filter_by(name=credentials.username).first()
             if user is None:
+                logger.error('User does not exist')
                 raise self.exceptions.auth_exception
 
             correct_password = secrets.compare_digest(credentials.password, user.password)
 
             if not (credentials.username and correct_password):
+                logger.error('Wrong pass')
                 raise self.exceptions.auth_exception
 
             user_data = {'username': credentials.username, 'is_seller': user.is_seller, 'user_id': user.id}
             access_token = self.create_access_token(user_data)
+            logger.info(f'Token is created (is seller {user.is_seller})): {access_token}')
             return {'access_token': access_token}
 
         @logger.catch
@@ -77,6 +82,7 @@ class SAPI(FastAPI):
             decode_data = self.get_data_from_token(access_token)
 
             if not decode_data.get('is_seller'):
+                logger.error('Forbidden exception. Not for customers')
                 raise self.exceptions.forbidden_exception
 
             exists_product: Product = self.session.query(Product).filter_by(lable=lable).first()
@@ -85,11 +91,13 @@ class SAPI(FastAPI):
                 new_product = Product(lable=lable, price=price, count=count)
                 self.session.add(new_product)
                 self.session.commit()
+                logger.info(f'Added new product: {lable}')
                 return {'Product': lable}
 
             exists_product.count += count
             self.session.add(exists_product)
             self.session.commit()
+            logger.info(f'Added {count} to exists product {lable}')
             return {'Product': lable}
 
         @logger.catch
@@ -98,14 +106,17 @@ class SAPI(FastAPI):
             decode_data = self.get_data_from_token(access_token)
 
             if decode_data.get('is_seller'):
+                logger.error('Forbidden exception. Not for sellers')
                 raise self.exceptions.forbidden_exception
 
             product: Product = self.session.query(Product).filter_by(lable=lable).first()
 
             if product is None:
+                logger.error('Product does not exist')
                 raise self.exceptions.bad_request
 
             if product.count == 0 or product.count - count < 0:
+                logger.error('Not enough count of product')
                 raise self.exceptions.limit_exception
 
             product.count -= count
@@ -115,11 +126,13 @@ class SAPI(FastAPI):
 
             if order is None or not order.is_active:
                 order = Order(customer_id=decode_data.get('user_id'), product_id=product.id, count=0)
+                logger.info('New order is created')
 
             order.count += count
             self.session.add(product)
             self.session.add(order)
             self.session.commit()
+            logger.info('Order is updated')
             return {'Order_id': order.id}
 
         @logger.catch
@@ -128,6 +141,7 @@ class SAPI(FastAPI):
             decode_data = self.get_data_from_token(access_token)
 
             if decode_data.get('is_seller'):
+                logger.error('Forbidden exception. Not for sellers')
                 raise self.exceptions.forbidden_exception
 
             current_orders: [Order] = self.session.query(Order) \
@@ -135,6 +149,7 @@ class SAPI(FastAPI):
                 .filter_by(is_active=True).all()
 
             if not current_orders:
+                logger.error('Orders does not exist')
                 raise self.exceptions.bad_request
 
             total_sum = 0
@@ -146,4 +161,5 @@ class SAPI(FastAPI):
                                                  .first().price
                                                  )
             self.session.commit()
+            logger.info(f'User paid for the order: {total_sum}')
             return {'total sum': total_sum}
