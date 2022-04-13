@@ -1,4 +1,4 @@
-from fastapi import Depends, Request, FastAPI
+from fastapi import Depends, Request, FastAPI, Body
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import create_engine
@@ -7,6 +7,7 @@ from CustomHTTPException import HTTPExceptions
 
 from Settings import config, settings
 from models.models import *
+from requests_models import *
 
 from jose import JWTError, jwt
 
@@ -24,7 +25,7 @@ class SAPI(FastAPI):
         self.security = HTTPBasic()
         self.engine = create_engine(f'postgresql+psycopg2://{config.DB_USER}:{config.DB_PASS}'
                                     f'@{config.DB_HOST}/{config.DB_NAME}')
-
+        self.tokenlifetime = 15
         self.engine.connect()
         self.exceptions = HTTPExceptions()
         logger.add('logs/logs.log', format="{time} {level} {message}")
@@ -37,7 +38,7 @@ class SAPI(FastAPI):
 
     def create_access_token(self, data: dict):
         encode_data = data.copy()
-        last_moment = (datetime.utcnow() + timedelta(minutes=15)).strftime(self.str_format)
+        last_moment = (datetime.utcnow() + timedelta(minutes=self.tokenlifetime)).strftime(self.str_format)
         encode_data.update({'last_moment': last_moment})
         encode_jwt = jwt.encode(encode_data, settings.SECRET_KEY, settings.ALGORITHM)
         return encode_jwt
@@ -56,29 +57,52 @@ class SAPI(FastAPI):
 
         return decode_data
 
+    def user_auth_verify(self, credentials: AuthUserModel):
+        user: User = self.session.query(User).filter_by(name=credentials.name).first()
+        if user is None:
+            logger.error('User does not exist')
+            raise self.exceptions.auth_exception
+
+        correct_password = secrets.compare_digest(credentials.password, user.password)
+
+        if not (credentials.name and correct_password):
+            logger.error('Wrong pass')
+            raise self.exceptions.auth_exception
+
+        return {'username': user.name, 'is_seller': user.is_seller, 'user_id': user.id}
+
+    def user_reg_verify(self, credentials: RegUserModel):
+        user: User = self.session.query(User).filter_by(name=credentials.name).first()
+        if user is None:
+            return credentials
+
+        logger.error('User already exists')
+        raise self.exceptions.name_conflict
+
     def methods_init(self):
         @logger.catch
-        @self.get('/auth')
-        def auth(credentials: HTTPBasicCredentials = Depends(self.security)):
-            user: User = self.session.query(User).filter_by(name=credentials.username).first()
-            if user is None:
-                logger.error('User does not exist')
-                raise self.exceptions.auth_exception
+        @self.post('/auth')
+        def auth(credentials: dict = Depends(self.user_auth_verify)):
 
-            correct_password = secrets.compare_digest(credentials.password, user.password)
+            access_token = self.create_access_token(credentials)
+            logger.info(f'Token is created (is seller {credentials.get("is_seller")})): {access_token}')
+            return {'access_token': access_token}
 
-            if not (credentials.username and correct_password):
-                logger.error('Wrong pass')
-                raise self.exceptions.auth_exception
+        @logger.catch
+        @self.post('/reg')
+        def reg(credentials: RegUserModel = Depends(self.user_reg_verify)):
 
-            user_data = {'username': credentials.username, 'is_seller': user.is_seller, 'user_id': user.id}
-            access_token = self.create_access_token(user_data)
-            logger.info(f'Token is created (is seller {user.is_seller})): {access_token}')
+            new_user = User(name=credentials.name, password=credentials.password, is_seller=credentials.is_seller)
+            self.session.add(new_user)
+            self.session.commit()
+            token_data = {'username': new_user.name, 'is_seller': new_user.is_seller, 'user_id': new_user.id}
+            access_token = self.create_access_token(token_data)
+            logger.info(f'New user (is seller {new_user.is_seller})): {access_token}')
             return {'access_token': access_token}
 
         @logger.catch
         @self.post('/add_to_store')
-        def add_product_to_store(access_token: str, lable: str, price: float, count: int = 0):
+        def add_product_to_store(access_token: str = Body(...), lable: str = '', price: float = 0, count: int = 0):
             decode_data = self.get_data_from_token(access_token)
 
             if not decode_data.get('is_seller'):
@@ -102,7 +126,7 @@ class SAPI(FastAPI):
 
         @logger.catch
         @self.post('/add_to_cart')
-        def add_product_to_cart(access_token: str, lable: str, count: int = 1):
+        def add_product_to_cart(access_token: str = Body(...), lable: str = '', count: int = 1):
             decode_data = self.get_data_from_token(access_token)
 
             if decode_data.get('is_seller'):
@@ -137,7 +161,7 @@ class SAPI(FastAPI):
 
         @logger.catch
         @self.post('/buy')
-        def buy(access_token: str):
+        def buy(access_token: str = Body(...)):
             decode_data = self.get_data_from_token(access_token)
 
             if decode_data.get('is_seller'):

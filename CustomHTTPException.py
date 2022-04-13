@@ -22,3 +22,8 @@ class HTTPExceptions:
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="Bad_request"
     )
+
+    name_conflict = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="User already exists"
+    )
