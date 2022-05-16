@@ -1,18 +1,16 @@
-from fastapi import Depends, Request, FastAPI, Body
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, FastAPI, Body
+from fastapi.security import HTTPBasic
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import create_engine
 
-from CustomHTTPException import HTTPExceptions
+from CustomHTTPException import *
 
-from Settings import config, settings
-from models.models import *
-from requests_models import *
-
-from jose import JWTError, jwt
+from Security.security import create_access_token, get_data_from_token
+from Settings import config
+from models.db import *
+from models.requests_data import *
 
 import secrets
-from datetime import datetime, timedelta
 
 from loguru import logger
 
@@ -21,13 +19,10 @@ class SAPI(FastAPI):
 
     def __init__(self):
         FastAPI.__init__(self)
-        self.str_format = '%d.%m.%Y %H:%M:%S'
         self.security = HTTPBasic()
         self.engine = create_engine(f'postgresql+psycopg2://{config.DB_USER}:{config.DB_PASS}'
                                     f'@{config.DB_HOST}/{config.DB_NAME}')
-        self.tokenlifetime = 15
         self.engine.connect()
-        self.exceptions = HTTPExceptions()
         logger.add('logs/logs.log', format="{time} {level} {message}")
         Base.metadata.bind = self.engine
         Base.metadata.create_all(self.engine)
@@ -36,38 +31,17 @@ class SAPI(FastAPI):
         self.session: Session = self.DBSession()
         self.methods_init()
 
-    def create_access_token(self, data: dict):
-        encode_data = data.copy()
-        last_moment = (datetime.utcnow() + timedelta(minutes=self.tokenlifetime)).strftime(self.str_format)
-        encode_data.update({'last_moment': last_moment})
-        encode_jwt = jwt.encode(encode_data, settings.SECRET_KEY, settings.ALGORITHM)
-        return encode_jwt
-
-    def get_data_from_token(self, access_token: str):
-        decode_data = jwt.decode(access_token, settings.SECRET_KEY, settings.ALGORITHM)
-        last_moment = datetime.strptime(decode_data.get('last_moment'), self.str_format)
-
-        if last_moment is None:
-            logger.error('Bad token')
-            raise self.exceptions.auth_exception
-
-        if datetime.utcnow() > last_moment:
-            logger.error('Lifetime of token is ended')
-            raise self.exceptions.auth_exception
-
-        return decode_data
-
     def user_auth_verify(self, credentials: AuthUserModel):
         user: User = self.session.query(User).filter_by(name=credentials.name).first()
         if user is None:
             logger.error('User does not exist')
-            raise self.exceptions.auth_exception
+            raise AuthException()
 
         correct_password = secrets.compare_digest(credentials.password, user.password)
 
         if not (credentials.name and correct_password):
             logger.error('Wrong pass')
-            raise self.exceptions.auth_exception
+            raise AuthException()
 
         return {'username': user.name, 'is_seller': user.is_seller, 'user_id': user.id}
 
@@ -77,18 +51,16 @@ class SAPI(FastAPI):
             return credentials
 
         logger.error('User already exists')
-        raise self.exceptions.name_conflict
+        raise NameConflict()
 
     def methods_init(self):
-        @logger.catch
         @self.post('/auth')
         def auth(credentials: dict = Depends(self.user_auth_verify)):
 
-            access_token = self.create_access_token(credentials)
+            access_token = create_access_token(credentials)
             logger.info(f'Token is created (is seller {credentials.get("is_seller")})): {access_token}')
             return {'access_token': access_token}
 
-        @logger.catch
         @self.post('/reg')
         def reg(credentials: RegUserModel = Depends(self.user_reg_verify)):
 
@@ -96,18 +68,17 @@ class SAPI(FastAPI):
             self.session.add(new_user)
             self.session.commit()
             token_data = {'username': new_user.name, 'is_seller': new_user.is_seller, 'user_id': new_user.id}
-            access_token = self.create_access_token(token_data)
+            access_token = create_access_token(token_data)
             logger.info(f'New user (is seller {new_user.is_seller})): {access_token}')
             return {'access_token': access_token}
 
-        @logger.catch
         @self.post('/add_to_store')
         def add_product_to_store(access_token: str = Body(...), lable: str = '', price: float = 0, count: int = 0):
-            decode_data = self.get_data_from_token(access_token)
+            decode_data = get_data_from_token(access_token)
 
             if not decode_data.get('is_seller'):
                 logger.error('Forbidden exception. Not for customers')
-                raise self.exceptions.forbidden_exception
+                raise ForbiddenException()
 
             exists_product: Product = self.session.query(Product).filter_by(lable=lable).first()
 
@@ -124,24 +95,23 @@ class SAPI(FastAPI):
             logger.info(f'Added {count} to exists product {lable}')
             return {'Product': lable}
 
-        @logger.catch
         @self.post('/add_to_cart')
         def add_product_to_cart(access_token: str = Body(...), lable: str = '', count: int = 1):
-            decode_data = self.get_data_from_token(access_token)
+            decode_data = get_data_from_token(access_token)
 
             if decode_data.get('is_seller'):
                 logger.error('Forbidden exception. Not for sellers')
-                raise self.exceptions.forbidden_exception
+                raise ForbiddenException()
 
             product: Product = self.session.query(Product).filter_by(lable=lable).first()
 
             if product is None:
                 logger.error('Product does not exist')
-                raise self.exceptions.bad_request
+                raise BadRequest()
 
             if product.count == 0 or product.count - count < 0:
                 logger.error('Not enough count of product')
-                raise self.exceptions.limit_exception
+                raise LimitException()
 
             product.count -= count
 
@@ -159,14 +129,13 @@ class SAPI(FastAPI):
             logger.info('Order is updated')
             return {'Order_id': order.id}
 
-        @logger.catch
         @self.post('/buy')
         def buy(access_token: str = Body(...)):
-            decode_data = self.get_data_from_token(access_token)
+            decode_data = get_data_from_token(access_token)
 
             if decode_data.get('is_seller'):
                 logger.error('Forbidden exception. Not for sellers')
-                raise self.exceptions.forbidden_exception
+                raise ForbiddenException()
 
             current_orders: [Order] = self.session.query(Order) \
                 .filter_by(customer_id=decode_data.get('user_id')) \
@@ -174,7 +143,7 @@ class SAPI(FastAPI):
 
             if not current_orders:
                 logger.error('Orders does not exist')
-                raise self.exceptions.bad_request
+                raise BadRequest()
 
             total_sum = 0
             for order in current_orders:

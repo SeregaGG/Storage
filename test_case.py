@@ -11,7 +11,7 @@ customer = {'name': 'user', 'password': 'qwe'}
 host = 'http://127.0.0.1:8000'
 
 old_user = {'name': 'seller', 'password': 'qwe', 'is_seller': True}
-new_user = {'name': 'newuser2', 'password': 'qwe', 'is_seller': True}  # need to change username for new tests
+new_user = {'name': 'newuser3', 'password': 'qwe', 'is_seller': True}  # need to change username for new tests
 
 
 def auth_test(data):
